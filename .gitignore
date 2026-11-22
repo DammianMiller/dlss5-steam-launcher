@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 .cache/
 *.log
+.claude/settings.local.json
+.factory/settings.local.json
+.codex/config.toml
+.forge/settings.local.json
+.uap/

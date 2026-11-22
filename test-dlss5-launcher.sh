@@ -223,8 +223,21 @@ cp "$COMPONENTS/retoque/nvngx.dll_dlssnr.dll" "$FS/steamapps/common/FakeGame/bin
 cp "$COMPONENTS/retoque/nvngx.dll_dlssnr.dll" "$FS/steamapps/common/Helldivers 2/bin/helldivers2.exe"
 EXE=$FS/steamapps/common/FakeGame/bin
 
-run() { # run <args...> — invoke the launcher against the fake root
-    DLSS5_STEAM_ROOT=$FS DLSS5_COMPONENTS_DIR=$COMPONENTS bash "$LAUNCHER" "$@"
+# Fake Epic Games Launcher v2 data dir (library cache with one assessed game
+# and one unassessed purchase) + a fake install root holding Death Stranding.
+EPICD=$WORK/fake-eglv2
+EROOT=$WORK/epicroot
+EACCT=$EPICD/cache/prod/account/8b7d5b55211f4a4a88cb56fd19d96527
+mkdir -p "$EACCT" "$EROOT/DeathStranding"
+cat > "$EACCT/library-cache.json" <<'EOF'
+{"items":[{"appId":{"appName":"Boga"}},{"appId":{"appName":"UnassessedNewGame77"}}]}
+EOF
+cp "$COMPONENTS/retoque/nvngx.dll_dlssnr.dll" "$EROOT/DeathStranding/DeathStranding.exe"
+EEXE=$EROOT/DeathStranding
+
+run() { # run <args...> — invoke the launcher against the fake roots
+    DLSS5_STEAM_ROOT=$FS DLSS5_EGLV2_DIR=$EPICD DLSS5_EPIC_ROOTS=$EROOT \
+    DLSS5_COMPONENTS_DIR=$COMPONENTS bash "$LAUNCHER" "$@"
 }
 
 # 2.1 list and doctor
@@ -340,6 +353,109 @@ check 'restore returns the user ini byte-exact' run restore 999000
 [[ ! -e $EXE/dxgi.dll && ! -e $EXE/OptiScaler.dll && ! -e $EXE/nvngx.dll_dlssnr.dll \
     && ! -e $EXE/nvngx_dlssnr.dll && ! -e $EXE/.dlss5-launcher ]] \
     && ok 'no override residue after restore' || bad 'residue left after restore'
+
+# ------------------------------------------------ 3. epic library (helpers)
+# 3.0 unit checks of the epic helpers against the fixtures above
+is_epic epic:Boga && ! is_epic 292030 \
+    && ok 'is_epic: epic: prefix detected' || bad 'is_epic failed'
+[[ $(epic_app epic:Boga) == Boga ]] \
+    && ok 'epic_app: appName extracted' || bad 'epic_app failed'
+[[ $(DLSS5_EPIC_ROOTS='/a:/b' epic_roots | tr '\n' ' ') == '/a /b ' ]] \
+    && ok 'epic_roots: colon-separated override parsed' || bad 'epic_roots override failed'
+[[ $(DLSS5_EPIC_ROOTS=$EROOT epic_gamedir_for epic:Boga) == "$EEXE" ]] \
+    && ok 'epic_gamedir_for: installed game dir found' || bad 'epic_gamedir_for failed'
+DLSS5_EPIC_ROOTS=$EROOT epic_gamedir_for epic:Larkspur >/dev/null 2>&1
+[[ $? -eq 1 ]] \
+    && ok 'epic_gamedir_for: absent install dir returns 1' || bad 'epic_gamedir_for rc wrong'
+[[ $(DLSS5_EGLV2_DIR=$EPICD epic_cache_appnames | sort | tr '\n' ' ') == 'Boga UnassessedNewGame77 ' ]] \
+    && ok 'epic_cache_appnames: cache appNames listed' || bad 'epic_cache_appnames failed'
+epic_list_keys | grep -qx 'epic:Boga' \
+    && ok 'epic_list_keys: table keys sorted by title' || bad 'epic_list_keys failed'
+[[ $(epic_list_keys | wc -l) -eq 166 ]] \
+    && ok 'epic_list_keys: all 166 owned items listed' || bad 'epic_list_keys count wrong'
+[[ -z $(DLSS5_STEAM_ROOT=$FS compat_tool_for epic:Boga) ]] \
+    && ok 'compat_tool_for: epic keys skip the Steam config' || bad 'compat_tool_for leaked into epic'
+
+# ------------------------------------------------ 4. e2e on the epic tree
+# 4.1 list covers both stores
+check 'list (steam+epic fixtures): exits 0' run list
+grep_out 'list: fake steam game shown eligible' 'Fake Game'
+grep_out 'list: epic section shows Death Stranding' 'Death Stranding'
+grep_out 'list: epic counts line' '85 eligible, 35 excluded, 46 not games'
+grep_out 'list: epic excluded summary present' 'excluded  epic:Dodo:'
+check 'list --tsv: exits 0' run list --tsv
+if awk -F'\t' '$1=="epic" && $2=="epic:Boga" && $3=="Death Stranding" && $4=="eligible" && NF==5' \
+        "$WORK/last.out" | grep -q .; then
+    ok 'list --tsv: epic row shape source/id/title/state/exedir'
+else
+    bad 'list --tsv: epic row shape wrong'
+fi
+if awk -F'\t' '$1=="steam" && $2=="999000" && NF==5' "$WORK/last.out" | grep -q .; then
+    ok 'list --tsv: steam row shape intact'
+else
+    bad 'list --tsv: steam row shape wrong'
+fi
+grep_out 'list: warns about the unassessed epic purchase' 'UnassessedNewGame77'
+
+# 4.2 doctor reports the epic section
+check 'doctor: exits 0 with the epic fixtures' run doctor
+grep_out 'doctor: reports the EGL v2 data dir' 'Epic EGLv2'
+grep_out 'doctor: reports the epic root' 'Epic root'
+
+# 4.3 full install on an epic game (same engine path as Steam)
+check 'setup epic:Boga installs the override' run setup epic:Boga
+grep_out 'setup epic: compat notes the EGL Proton runtime' 'Epic Games Launcher runs this game under its own Proton'
+[[ $(sha_of "$EEXE/dxgi.dll") == "$PIN_OPTISCALER" ]] \
+    && ok 'epic: dxgi.dll is the pinned Retoque proxy' || bad 'epic: dxgi.dll hash mismatch'
+[[ $(sha_of "$EEXE/nvngx_dlssnr.dll") == "$PIN_MODEL" ]] \
+    && ok 'epic: NR model 310.9.16 installed and pinned' || bad 'epic: model hash mismatch'
+[[ $(ini_get "$EEXE/OptiScaler.ini" DlssNr Enabled) == true \
+    && $(ini_get "$EEXE/OptiScaler.ini" DlssNr Preset) == 2 ]] \
+    && ok 'epic: ini keys set (Enabled=true, Preset=2)' || bad 'epic: ini keys wrong'
+[[ $(awk -F'\t' '$1=="status"{print $2}' "$EEXE/.retoque/receipt.txt" | tail -n1) == complete ]] \
+    && ok 'epic: engine receipt is complete' || bad 'epic: receipt not complete'
+
+# 4.4 status and presets on an epic key
+check 'status epic:Boga exits 0' run status epic:Boga
+grep_out 'status epic: shows the pinned model' '310.9.16 (pinned)'
+grep_out 'status epic: compat line names EGL v2' 'EGLv2'
+check 'status (no args) lists installed epic games' run status
+grep_out 'status (no args): Death Stranding present' 'Death Stranding'
+check 'preset A applies on an epic key' run preset A epic:Boga
+[[ $(ini_get "$EEXE/OptiScaler.ini" DlssNr Preset) == 1 ]] \
+    && ok 'preset A wrote 1 on the epic key' || bad 'preset A failed on epic'
+check 'preset B applies on an epic key' run preset B epic:Boga
+[[ $(ini_get "$EEXE/OptiScaler.ini" DlssNr Preset) == 2 ]] \
+    && ok 'preset B wrote 2 on the epic key' || bad 'preset B failed on epic'
+
+# 4.5 refusals for epic keys (exit code + message)
+check_fails 'setup refuses an owned-but-not-installed epic game' 1 run setup epic:Larkspur
+grep_out 'refusal: install it with the Epic Games Launcher' 'install it with the Epic Games Launcher'
+check_fails 'setup refuses an excluded anti-cheat epic game' 1 run setup epic:Peppermint
+grep_out 'refusal: names the anti-cheat reason' 'EasyAntiCheat'
+check_fails 'setup refuses an excluded renderer epic game' 1 run setup epic:Dodo
+grep_out 'refusal: names the renderer reason' 'D3D9'
+check_fails 'setup refuses a non-game epic item' 1 run setup epic:TM_2020.1
+check_fails 'setup refuses an unknown epic key' 1 run setup epic:NoSuchKey
+check_fails 'launch refuses an excluded epic game' 1 run launch epic:Dodo
+
+# 4.6 restore on an epic key
+check 'restore epic:Boga removes the override' run restore epic:Boga
+[[ ! -e $EEXE/dxgi.dll && ! -e $EEXE/nvngx_dlssnr.dll && ! -e $EEXE/OptiScaler.ini \
+    && ! -e $EEXE/.dlss5-launcher ]] \
+    && ok 'epic: no override residue after restore' || bad 'epic: residue left after restore'
+
+# 4.7 launch hands the EGL URL scheme to the Epic launcher binary
+mkdir -p "$WORK/bin"
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" > "%s/urlargs.txt"\n' "$WORK" > "$WORK/bin/EpicGamesLauncher"
+chmod +x "$WORK/bin/EpicGamesLauncher"
+check 'launch epic:Boga exits 0 through the shim' \
+    env PATH="$WORK/bin:$PATH" DLSS5_STEAM_ROOT=$FS DLSS5_EGLV2_DIR=$EPICD \
+        DLSS5_EPIC_ROOTS=$EROOT bash "$LAUNCHER" launch epic:Boga
+sleep 1
+[[ $(cat "$WORK/urlargs.txt" 2>/dev/null) == 'com.epicgames.launcher://apps/Boga?action=launch&silent=true' ]] \
+    && ok 'launch: EGL URL action=launch&silent=true handed to the binary' \
+    || bad 'launch: wrong or missing URL handed to the Epic binary'
 
 # ------------------------------------------------------------------ summary
 say ''

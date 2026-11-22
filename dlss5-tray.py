@@ -39,11 +39,38 @@ except Exception:  # pragma: no cover - GNOME without appindicator
 from gi.repository import GLib, Gtk
 
 # ------------------------------------------------------------- games -----
-GAMES = [
+# The game list is loaded from the launcher's machine-readable output
+# (`list --tsv`: source, id, title, state, exedir) so the tray follows the
+# launcher's whole library — Steam and Epic — without hardcoded ids here.
+# Only games the launcher can act on (installed or eligible) are shown; the
+# fallback list below is used when the launcher cannot be read.
+FALLBACK_GAMES = [
     # (appid, display name)
     ("292030", "The Witcher 3: Wild Hunt — Remastered"),
     ("1371980", "No Rest for the Wicked"),
 ]
+GAMES = FALLBACK_GAMES
+
+
+def load_games():
+    """(id, title) for every installed/eligible game, from `list --tsv`."""
+    global GAMES
+    try:
+        proc = subprocess.run(
+            ["bash", launcher_path(), "list", "--tsv"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=120, text=True, errors="replace")
+        rows = []
+        for line in proc.stdout.splitlines():
+            f = line.split("\t")
+            if len(f) >= 4 and f[0] in ("steam", "epic") \
+                    and f[3] in ("installed", "eligible"):
+                rows.append((f[1], f[2]))
+        if rows:
+            GAMES = rows
+    except Exception:
+        pass  # launcher unreadable — keep the fallback list
+    return GAMES
 
 PRESETS = {"A": "1", "B": "2"}          # letter -> ini Preset value
 PRESET_FROM_INI = {"1": "A", "2": "B"}   # ini Preset value -> letter
@@ -320,6 +347,7 @@ class App:
 
     def build(self):
         self.runner = Runner(self.output)
+        load_games()   # panel and menus read GAMES — fill it first
 
         # ---- panel ----
         self.panel = Panel(self.runner, self.refresh_status)
